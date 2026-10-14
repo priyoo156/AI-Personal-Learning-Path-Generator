@@ -11,76 +11,11 @@ import { cn } from '@/lib/utils';
 import type { Quiz, QuizQuestion } from '@/types';
 import toast from 'react-hot-toast';
 
-const DEFAULT_QUIZ: Quiz = {
-  id: 'quiz-rag-1',
-  user_id: 'demo',
-  title: 'Retrieval-Augmented Generation & Embeddings Mastery',
-  difficulty: 'medium',
-  is_ai_generated: true,
-  created_at: new Date().toISOString(),
-  questions: [
-    {
-      id: 'q1',
-      question: 'Which distance metric is equivalent to inner product (dot product) when vector embeddings are normalized to unit length?',
-      options: [
-        'Euclidean Distance (L2)',
-        'Cosine Similarity',
-        'Manhattan Distance (L1)',
-        'Hamming Distance'
-      ],
-      correct_answer: 'Cosine Similarity',
-      explanation: 'When vectors have a magnitude (norm) of 1, the cosine similarity formula simplifies directly to their dot product, allowing faster indexing and calculation.',
-      difficulty: 'medium',
-      question_type: 'mcq'
-    },
-    {
-      id: 'q2',
-      question: 'What is the primary benefit of Hierarchical Navigable Small World (HNSW) indexing over standard IVFFlat indexing in vector databases?',
-      options: [
-        'HNSW consumes significantly less RAM memory',
-        'HNSW provides sub-linear search time with high recall at scale without requiring cluster retraining',
-        'HNSW only works with binary strings',
-        'HNSW converts floating point numbers to 8-bit integers automatically'
-      ],
-      correct_answer: 'HNSW provides sub-linear search time with high recall at scale without requiring cluster retraining',
-      explanation: 'HNSW constructs a multi-layer geometric graph structure that provides rapid logarithmic routing during similarity queries with very high recall.',
-      difficulty: 'hard',
-      question_type: 'mcq'
-    },
-    {
-      id: 'q3',
-      question: 'In prompt engineering, what does "Chain-of-Thought" (CoT) prompting specifically encourage the model to do?',
-      options: [
-        'Send parallel requests to multiple LLM APIs simultaneously',
-        'Generate intermediate reasoning steps before delivering the final answer',
-        'Shorten the context window by discarding earlier tokens',
-        'Convert natural language queries to SQL schemas automatically'
-      ],
-      correct_answer: 'Generate intermediate reasoning steps before delivering the final answer',
-      explanation: 'Chain-of-thought prompting breaks complex logic down into explicit reasoning steps, allowing models to catch intermediate errors and increase accuracy.',
-      difficulty: 'easy',
-      question_type: 'mcq'
-    },
-    {
-      id: 'q4',
-      question: 'True or False: Using structured JSON Schema validation with LLMs guarantees the model will never produce a factually incorrect response.',
-      options: [
-        'True',
-        'False'
-      ],
-      correct_answer: 'False',
-      explanation: 'Structured output guarantees that the syntax matches your schema (keys and types), but the values contained inside can still be hallucinations.',
-      difficulty: 'easy',
-      question_type: 'true_false'
-    }
-  ]
-};
-
 export default function QuizzesPage() {
   const [searchParams] = useSearchParams();
   const topicParam = searchParams.get('title') || 'Generative AI & LLM Engineering';
 
-  const [activeQuiz, setActiveQuiz] = useState<Quiz>(DEFAULT_QUIZ);
+  const [activeQuiz, setActiveQuiz] = useState<Quiz | null>(null);
   const [currentQuestionIdx, setCurrentQuestionIdx] = useState(0);
   const [selectedAnswers, setSelectedAnswers] = useState<Record<string, string>>({});
   const [isSubmitted, setIsSubmitted] = useState(false);
@@ -102,7 +37,7 @@ export default function QuizzesPage() {
       .map((topic) => topic.title)
   ));
 
-  const currentQuestion: QuizQuestion = activeQuiz.questions[currentQuestionIdx];
+  const currentQuestion: QuizQuestion | undefined = activeQuiz?.questions[currentQuestionIdx];
 
   const handleSelectAnswer = (ans: string) => {
     if (isSubmitted) return;
@@ -113,6 +48,7 @@ export default function QuizzesPage() {
   };
 
   const handleNext = () => {
+    if (!activeQuiz) return;
     if (currentQuestionIdx < activeQuiz.questions.length - 1) {
       setCurrentQuestionIdx((idx) => idx + 1);
     }
@@ -125,6 +61,7 @@ export default function QuizzesPage() {
   };
 
   const calculateScore = () => {
+    if (!activeQuiz) return { correct: 0, total: 0, percentage: 0 };
     let correct = 0;
     activeQuiz.questions.forEach((q) => {
       if (selectedAnswers[q.id] === q.correct_answer) {
@@ -139,6 +76,7 @@ export default function QuizzesPage() {
   };
 
   const handleSubmitQuiz = () => {
+    if (!activeQuiz) return;
     const answeredCount = Object.keys(selectedAnswers).length;
     if (answeredCount < activeQuiz.questions.length) {
       if (!confirm(`You have answered ${answeredCount} of ${activeQuiz.questions.length} questions. Submit anyway?`)) {
@@ -176,7 +114,7 @@ export default function QuizzesPage() {
     }
   };
 
-  const score = calculateScore();
+  const score = activeQuiz ? calculateScore() : null;
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
@@ -251,6 +189,7 @@ export default function QuizzesPage() {
       </div>
 
       {/* Main Quiz Area */}
+      {activeQuiz && (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left 2 Cols: Question Box */}
         <div className="lg:col-span-2 space-y-4">
@@ -265,7 +204,6 @@ export default function QuizzesPage() {
                   {currentQuestion.difficulty}
                 </span>
               </div>
-
               <div className="text-xs font-mono text-muted-foreground">
                 {Object.keys(selectedAnswers).length}/{activeQuiz.questions.length} answered
               </div>
@@ -433,6 +371,14 @@ export default function QuizzesPage() {
           </div>
         </div>
       </div>
+      )}
+      {!activeQuiz && (
+        <div className="card p-8 text-center">
+          <BookOpen className="mx-auto h-10 w-10 text-muted-foreground" />
+          <h2 className="mt-3 font-display text-lg font-semibold">Your quiz will appear here</h2>
+          <p className="mt-1 text-sm text-muted-foreground">Choose a roadmap topic or enter your own, set the level and question count, then generate a quiz.</p>
+        </div>
+      )}
     </div>
   );
 }

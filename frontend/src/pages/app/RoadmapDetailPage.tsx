@@ -177,26 +177,21 @@ export default function RoadmapDetailPage() {
   const [activeTab, setActiveTab] = useState<'curriculum' | 'overview' | 'resources'>('curriculum');
 
   // Query roadmap
-  const { data: roadmapRes, isLoading } = useQuery({
+  const { data: roadmapRes, isLoading, isError } = useQuery({
     queryKey: ['roadmap', id],
     queryFn: async () => {
-      try {
-        if (!id || id === 'demo' || id === 'demo-fullstack-ai') return { data: MOCK_ROADMAP };
-        const res = await roadmapApi.get(id);
-        return res.data;
-      } catch (err) {
-        console.warn('Using mock roadmap data', err);
-        return { data: { ...MOCK_ROADMAP, id: id || 'demo-fullstack-ai' } };
-      }
+      if (!id) throw new Error('A roadmap ID is required.');
+      const res = await roadmapApi.get(id);
+      return res.data;
     },
   });
 
-  const roadmap: Roadmap = (roadmapRes?.data as unknown as Roadmap) || MOCK_ROADMAP;
+  const roadmap = roadmapRes?.data as Roadmap | undefined;
 
   // Toggle topic completion mutation
   const toggleTopicMutation = useMutation({
     mutationFn: async ({ topicId, completed }: { topicId: string; completed: boolean }) => {
-      if (roadmap.id) {
+      if (roadmap?.id) {
         await roadmapApi.markTopicComplete(roadmap.id, topicId, completed);
       }
     },
@@ -227,8 +222,55 @@ export default function RoadmapDetailPage() {
       toast.success(completed ? 'Topic marked as finished! 🚀' : 'Topic marked as pending');
     },
     onError: () => {
+      queryClient.invalidateQueries({ queryKey: ['roadmap', id] });
       toast.error('Failed to update progress on server');
     },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['scheduler-tasks', id] });
+      queryClient.invalidateQueries({ queryKey: ['roadmaps'] });
+    },
+  });
+
+  const toggleSubtopicMutation = useMutation({
+    mutationFn: async ({
+      topicId,
+      subtopicIndex,
+      completed,
+    }: {
+      topicId: string;
+      subtopicIndex: number;
+      completed: boolean;
+    }) => {
+      if (!roadmap?.id) throw new Error('Roadmap is unavailable.');
+      const response = await roadmapApi.markSubtopicComplete(roadmap.id, topicId, subtopicIndex, completed);
+      return response.data.data as RoadmapTopic;
+    },
+    onSuccess: (updatedTopic) => {
+      queryClient.setQueryData(['roadmap', id], (old: { data: Roadmap } | undefined) => {
+        if (!old?.data) return old;
+        return {
+          ...old,
+          data: {
+            ...old.data,
+            completion_percentage: Math.round(
+              old.data.phases.flatMap((phase) => phase.topics)
+                .reduce((sum, topic) => sum + (topic.id === updatedTopic.id
+                  ? updatedTopic.completion_percentage
+                  : topic.completion_percentage), 0) /
+              old.data.phases.flatMap((phase) => phase.topics).length
+            ),
+            phases: old.data.phases.map((phase) => ({
+              ...phase,
+              topics: phase.topics.map((topic) => topic.id === updatedTopic.id ? updatedTopic : topic),
+            })),
+          },
+        };
+      });
+      setSelectedTopic(updatedTopic);
+      queryClient.invalidateQueries({ queryKey: ['scheduler-tasks', id] });
+      queryClient.invalidateQueries({ queryKey: ['roadmaps'] });
+    },
+    onError: () => toast.error('Could not update this subtopic. Please try again.'),
   });
 
   const togglePhase = (phaseId: string) => {
@@ -253,6 +295,9 @@ export default function RoadmapDetailPage() {
         if (top.objectives?.length) {
           md += `Objectives:\n${top.objectives.map((o) => `  - ${o}`).join('\n')}\n`;
         }
+        if (top.subtopics?.length) {
+          md += `Subtopics:\n${top.subtopics.map((subtopic) => `  - ${subtopic}`).join('\n')}\n`;
+        }
         if (top.resources?.length) {
           md += `Resources:\n${top.resources.map((r) => `  - [${r.title}](${r.url}) (${r.resource_type})`).join('\n')}\n`;
         }
@@ -270,13 +315,26 @@ export default function RoadmapDetailPage() {
     toast.success('Roadmap exported as Markdown!');
   };
 
-  const totalTopics = roadmap.phases?.reduce((acc, p) => acc + p.topics.length, 0) || 0;
-  const completedTopicsCount = roadmap.phases?.reduce(
+  const totalTopics = roadmap?.phases?.reduce((acc, p) => acc + p.topics.length, 0) || 0;
+  const completedTopicsCount = roadmap?.phases?.reduce(
     (acc, p) => acc + p.topics.filter((t) => t.is_completed).length,
     0
   ) || 0;
 
-  const allResources: LearningResource[] = roadmap.phases?.flatMap((p) => p.topics.flatMap((t) => t.resources || [])) || [];
+  const allResources: LearningResource[] = roadmap?.phases?.flatMap((p) => p.topics.flatMap((t) => t.resources || [])) || [];
+
+  if (isLoading) {
+    return <div className="p-8 text-center text-muted-foreground">Loading your roadmap…</div>;
+  }
+  if (isError || !roadmap) {
+    return (
+      <div className="mx-auto max-w-xl p-8 text-center">
+        <h1 className="text-xl font-semibold">Roadmap unavailable</h1>
+        <p className="mt-2 text-sm text-muted-foreground">This roadmap could not be loaded. It may have been deleted or the API is unavailable.</p>
+        <button type="button" className="btn-secondary mt-4" onClick={() => navigate('/app/roadmaps')}>Back to roadmaps</button>
+      </div>
+    );
+  }
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
@@ -750,14 +808,27 @@ export default function RoadmapDetailPage() {
                     Syllabus & Subtopics
                   </h3>
                   <ol className="space-y-2">
-                    {selectedTopic.subtopics.map((subtopic, index) => (
+                    {selectedTopic.subtopics.map((subtopic, index) => {
+                      const completed = selectedTopic.subtopic_progress?.[index] || false;
+                      return (
                       <li key={`${index}-${subtopic}`} className="flex items-start gap-2 text-sm text-foreground">
-                        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-brand-500/15 text-[11px] font-semibold text-brand-500">
-                          {index + 1}
-                        </span>
-                        <span>{subtopic}</span>
+                        <button
+                          type="button"
+                          disabled={toggleSubtopicMutation.isPending}
+                          aria-label={`${completed ? 'Mark incomplete' : 'Mark complete'}: ${subtopic}`}
+                          onClick={() => toggleSubtopicMutation.mutate({
+                            topicId: selectedTopic.id,
+                            subtopicIndex: index,
+                            completed: !completed,
+                          })}
+                          className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-brand-500/15 text-[11px] font-semibold text-brand-500"
+                        >
+                          {completed ? <CheckCircle2 className="h-4 w-4" /> : index + 1}
+                        </button>
+                        <span className={completed ? 'text-muted-foreground line-through' : ''}>{subtopic}</span>
                       </li>
-                    ))}
+                      );
+                    })}
                   </ol>
                 </div>
               )}

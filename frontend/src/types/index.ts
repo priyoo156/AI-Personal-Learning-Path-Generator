@@ -63,6 +63,7 @@ export interface RoadmapTopic {
   concepts: string[];
   prerequisites: string[];
   subtopics?: string[];
+  subtopic_progress?: boolean[];
   practice_activities: string[];
   resources: LearningResource[];
   assessment_questions?: string[];
@@ -93,6 +94,7 @@ export interface Roadmap {
   domain: string;
   current_level: LearningLevel;
   target_date?: string;
+  preferred_days?: string[];
   daily_hours: number;
   total_estimated_hours: number;
   total_estimated_weeks: number;
@@ -129,6 +131,8 @@ export interface StudyTask {
   id: string;
   roadmap_id: string;
   topic_id: string;
+  unit_key?: string;
+  subtopic?: string | null;
   user_id: string;
   title: string;
   description?: string;

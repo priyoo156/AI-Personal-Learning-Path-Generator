@@ -80,6 +80,12 @@ export const roadmapApi = {
 
   markTopicComplete: (roadmapId: string, topicId: string, completed: boolean) =>
     apiClient.patch<ApiResponse>(`/roadmaps/${roadmapId}/topics/${topicId}`, { is_completed: completed }),
+
+  markSubtopicComplete: (roadmapId: string, topicId: string, subtopicIndex: number, completed: boolean) =>
+    apiClient.patch<ApiResponse>(
+      `/roadmaps/${roadmapId}/topics/${topicId}/subtopics/${subtopicIndex}`,
+      { is_completed: completed }
+    ),
 };
 
 // ============================================================
@@ -140,6 +146,15 @@ export const notesApi = {
 
   delete: (id: string) =>
     apiClient.delete<ApiResponse>(`/notes/${id}`),
+};
+
+// ============================================================
+// Resource API
+// ============================================================
+export const resourceApi = {
+  list: () => apiClient.get<ApiResponse>('/resources'),
+  create: (data: Record<string, unknown>) => apiClient.post<ApiResponse>('/resources', data),
+  delete: (id: string) => apiClient.delete<ApiResponse>(`/resources/${id}`),
 };
 
 // ============================================================

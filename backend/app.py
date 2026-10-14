@@ -2,6 +2,8 @@ import os
 import json
 import uuid
 import math
+import sqlite3
+from urllib.parse import urlparse
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -193,6 +195,67 @@ STORE = {
 STORE["roadmaps"] = []
 STORE["tasks"] = []
 
+DATABASE_PATH = os.getenv(
+    "PATHORA_DB_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "pathora.sqlite3"),
+)
+EMPTY_STORE = {
+    "roadmaps": [],
+    "tasks": [],
+    "sessions": {},
+    "notes": [],
+    "quizzes": [],
+    "study_sessions": [],
+    "resources": [],
+}
+
+
+def _load_store():
+    connection = sqlite3.connect(DATABASE_PATH)
+    try:
+        with connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS app_state (state_key TEXT PRIMARY KEY, state_json TEXT NOT NULL)"
+            )
+            row = connection.execute(
+                "SELECT state_json FROM app_state WHERE state_key = 'main'"
+            ).fetchone()
+            if row:
+                stored = json.loads(row[0])
+                if not isinstance(stored, dict):
+                    raise ValueError("Local app data must be a JSON object.")
+                return {**EMPTY_STORE, **stored}
+            connection.execute(
+                "INSERT INTO app_state (state_key, state_json) VALUES ('main', ?)",
+                (json.dumps(EMPTY_STORE),),
+            )
+            return dict(EMPTY_STORE)
+    finally:
+        connection.close()
+
+
+def _persist_store():
+    connection = sqlite3.connect(DATABASE_PATH)
+    try:
+        with connection:
+            connection.execute(
+                "INSERT INTO app_state (state_key, state_json) VALUES ('main', ?) "
+                "ON CONFLICT(state_key) DO UPDATE SET state_json = excluded.state_json",
+                (json.dumps(STORE, ensure_ascii=False),),
+            )
+    finally:
+        connection.close()
+
+
+STORE = _load_store()
+
+
+@app.after_request
+def persist_successful_changes(response):
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and response.status_code < 400:
+        _persist_store()
+    return response
+
 # ── Health check ─────────────────────────────────────────────────────────────
 @app.route("/api/health", methods=["GET"])
 def health():
@@ -206,8 +269,8 @@ def get_roadmaps():
 @app.route("/api/roadmaps/<roadmap_id>", methods=["GET"])
 def get_roadmap(roadmap_id):
     rm = next((r for r in STORE["roadmaps"] if r["id"] == roadmap_id), None)
-    if not rm and STORE["roadmaps"]:
-        rm = STORE["roadmaps"][0]
+    if not rm:
+        return jsonify({"success": False, "error": "Roadmap not found."}), 404
     return jsonify({"success": True, "data": rm})
 
 
@@ -303,6 +366,7 @@ def _create_roadmap_from_ai(
                 "concepts": _string_list(raw_topic.get("concepts")),
                 "prerequisites": _string_list(raw_topic.get("prerequisites")),
                 "subtopics": subtopics,
+                "subtopic_progress": [False] * len(subtopics),
                 "practice_activities": _string_list(raw_topic.get("practice_activities")),
                 "resources": resources,
                 "is_completed": False,
@@ -521,6 +585,17 @@ JSON shape:
         return jsonify({"success": False, "error": "AI roadmap generation failed. Check the backend log and Gemini API configuration."}), 502
 
     STORE["roadmaps"].insert(0, roadmap)
+    try:
+        initial_tasks = _schedule_roadmap_tasks(
+            roadmap,
+            daily_hours,
+            learner_context["preferred_days"],
+            "morning",
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        STORE["roadmaps"].remove(roadmap)
+        return jsonify({"success": False, "error": f"Roadmap generated, but its study plan could not be scheduled: {exc}"}), 422
+    STORE["tasks"].extend(initial_tasks)
     return jsonify({"success": True, "data": roadmap})
 
 @app.route("/api/roadmaps/<roadmap_id>/topics/<topic_id>", methods=["PATCH"])
@@ -537,19 +612,83 @@ def mark_topic(roadmap_id, topic_id):
             if topic["id"] == topic_id:
                 topic["is_completed"] = bool(completed)
                 topic["completion_percentage"] = 100 if completed else 0
+                topic["subtopic_progress"] = [bool(completed)] * len(topic.get("subtopics", []))
+                for task in STORE["tasks"]:
+                    if task.get("roadmap_id") == roadmap_id and task.get("topic_id") == topic_id:
+                        task["status"] = "completed" if completed else "pending"
+                        task["completed_at"] = datetime.now().isoformat() if completed else None
                 topic_found = True
     if not topic_found:
         return jsonify({"success": False, "error": "Topic not found."}), 404
 
     topics = [topic for phase in roadmap.get("phases", []) for topic in phase.get("topics", [])]
-    completed_count = sum(topic.get("is_completed", False) for topic in topics)
-    roadmap["completion_percentage"] = round(completed_count * 100 / len(topics)) if topics else 0
+    roadmap["completion_percentage"] = round(
+        sum(topic.get("completion_percentage", 0) for topic in topics) / len(topics)
+    ) if topics else 0
     roadmap["updated_at"] = datetime.now().isoformat()
     return jsonify({"success": True, "data": {"completion_percentage": roadmap["completion_percentage"]}})
+
+
+@app.route("/api/roadmaps/<roadmap_id>/topics/<topic_id>/subtopics/<int:subtopic_index>", methods=["PATCH"])
+def mark_subtopic(roadmap_id, topic_id, subtopic_index):
+    data = request.get_json() or {}
+    completed = data.get("is_completed")
+    if not isinstance(completed, bool):
+        return jsonify({"success": False, "error": "Subtopic completion must be true or false."}), 400
+
+    roadmap = next((item for item in STORE["roadmaps"] if item["id"] == roadmap_id), None)
+    if not roadmap:
+        return jsonify({"success": False, "error": "Roadmap not found."}), 404
+    topic = next(
+        (topic for phase in roadmap.get("phases", []) for topic in phase.get("topics", [])
+         if topic["id"] == topic_id),
+        None,
+    )
+    if not topic:
+        return jsonify({"success": False, "error": "Topic not found."}), 404
+    if not 0 <= subtopic_index < len(topic.get("subtopics", [])):
+        return jsonify({"success": False, "error": "Subtopic not found."}), 404
+
+    progress = topic.setdefault("subtopic_progress", [False] * len(topic["subtopics"]))
+    progress[subtopic_index] = completed
+    unit_key = f"{topic_id}:subtopic:{subtopic_index}"
+    for task in STORE["tasks"]:
+        if task.get("roadmap_id") == roadmap_id and task.get("unit_key") == unit_key:
+            task["status"] = "completed" if completed else "pending"
+            task["completed_at"] = datetime.now().isoformat() if completed else None
+
+    topic_tasks = [
+        task for task in STORE["tasks"]
+        if task.get("roadmap_id") == roadmap_id and task.get("topic_id") == topic_id
+    ]
+    units = {}
+    for task in topic_tasks:
+        units.setdefault(task.get("unit_key", task["id"]), []).append(task)
+    if units:
+        completed_units = sum(
+            all(part.get("status") == "completed" for part in parts)
+            for parts in units.values()
+        )
+        topic["completion_percentage"] = round(completed_units * 100 / len(units))
+        topic["is_completed"] = completed_units == len(units)
+    elif topic.get("subtopics"):
+        topic["completion_percentage"] = round(
+            sum(progress) * 100 / len(topic["subtopics"])
+        )
+        topic["is_completed"] = all(progress)
+    roadmap_topics = [item for phase in roadmap.get("phases", []) for item in phase.get("topics", [])]
+    roadmap["completion_percentage"] = round(
+        sum(item.get("completion_percentage", 0) for item in roadmap_topics) / len(roadmap_topics)
+    ) if roadmap_topics else 0
+    roadmap["updated_at"] = datetime.now().isoformat()
+    return jsonify({"success": True, "data": topic})
+
 
 # ── Scheduler Endpoints ──────────────────────────────────────────────────────
 @app.route("/api/schedule/<roadmap_id>/tasks", methods=["GET"])
 def get_tasks(roadmap_id):
+    if not any(roadmap["id"] == roadmap_id for roadmap in STORE["roadmaps"]):
+        return jsonify({"success": False, "error": "Roadmap not found."}), 404
     tasks = [task for task in STORE["tasks"] if task.get("roadmap_id") == roadmap_id]
     start_date = request.args.get("start_date")
     end_date = request.args.get("end_date")
@@ -559,21 +698,228 @@ def get_tasks(roadmap_id):
         tasks = [task for task in tasks if task.get("scheduled_date", "") <= end_date]
     return jsonify({"success": True, "data": tasks})
 
+
+def _schedule_roadmap_tasks(roadmap, daily_hours, preferred_days, time_slot):
+    day_numbers = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+    selected_days = {
+        day_numbers[str(day).strip().lower()[:3]]
+        for day in preferred_days
+        if str(day).strip().lower()[:3] in day_numbers
+    }
+    if not selected_days:
+        raise ValueError("Select at least one valid study day.")
+    if not isinstance(daily_hours, (int, float)) or not 0.5 <= daily_hours <= 16:
+        raise ValueError("Daily study hours must be between 0.5 and 16.")
+    slot_starts = {"morning": 8 * 60, "afternoon": 14 * 60, "evening": 19 * 60}
+    if time_slot not in slot_starts:
+        raise ValueError("Choose a valid preferred study time.")
+
+    today = datetime.now().date()
+    deadline_text = roadmap.get("target_date")
+    deadline = datetime.strptime(deadline_text, "%Y-%m-%d").date() if deadline_text else None
+    if deadline and deadline < today:
+        raise ValueError("This roadmap's target date has passed. Update the target date before scheduling.")
+
+    daily_capacity = int(daily_hours * 60)
+    available_days = []
+    day = today
+    while (deadline is None or day <= deadline) and (deadline is not None or len(available_days) < 3660):
+        if day.weekday() in selected_days:
+            available_days.append(day)
+        day += timedelta(days=1)
+    if not available_days:
+        raise ValueError("No available study days fall before the roadmap target date.")
+
+    previous_tasks = [task for task in STORE["tasks"] if task.get("roadmap_id") == roadmap["id"]]
+    previous_units = {}
+    for task in previous_tasks:
+        unit_key = task.get("unit_key")
+        if unit_key:
+            previous_units.setdefault(unit_key, []).append(task)
+    completed_units = {
+        unit_key
+        for unit_key, unit_tasks in previous_units.items()
+        if unit_tasks and all(task.get("status") == "completed" for task in unit_tasks)
+    }
+
+    tasks = []
+    day_index = 0
+    used_minutes = 0
+    task_start_minutes = min(slot_starts[time_slot], 24 * 60 - daily_capacity)
+    for phase in sorted(roadmap.get("phases", []), key=lambda item: item.get("order_index", 0)):
+        for topic in sorted(phase.get("topics", []), key=lambda item: item.get("order_index", 0)):
+            if topic.get("is_completed"):
+                continue
+
+            units = [
+                {"key": f"{topic['id']}:subtopic:{index}", "title": subtopic, "type": "study",
+                 "description": topic.get("description", "")}
+                for index, subtopic in enumerate(topic.get("subtopics", []))
+            ]
+            units.extend(
+                {"key": f"{topic['id']}:practice:{index}", "title": activity, "type": "practice",
+                 "description": f"Hands-on practice for {topic['title']}."}
+                for index, activity in enumerate(topic.get("practice_activities", []))
+            )
+            if not units:
+                raise ValueError(f'Topic "{topic.get("title", "Untitled")}" has no subtopics to schedule.')
+
+            total_minutes = max(len(units), round(float(topic.get("estimated_hours", 1)) * 60))
+            base_minutes, extra_minutes = divmod(total_minutes, len(units))
+            for unit_index, unit in enumerate(units):
+                remaining = base_minutes + (1 if unit_index < extra_minutes else 0)
+                segment = 1
+                while remaining > 0:
+                    while day_index < len(available_days) and used_minutes >= daily_capacity:
+                        day_index += 1
+                        used_minutes = 0
+                    if day_index >= len(available_days):
+                        raise OverflowError(
+                            f'The available study days cannot fit all subtopics for "{roadmap["title"]}" before the target date.'
+                        )
+
+                    segment_minutes = min(remaining, daily_capacity - used_minutes)
+                    start_at = datetime.combine(
+                        available_days[day_index],
+                        datetime.min.time(),
+                    ) + timedelta(minutes=task_start_minutes + used_minutes)
+                    title = unit["title"] if segment == 1 else f'{unit["title"]} (Part {segment})'
+                    tasks.append({
+                        "id": f"task-{uuid.uuid4().hex[:10]}",
+                        "roadmap_id": roadmap["id"],
+                        "topic_id": topic["id"],
+                        "unit_key": unit["key"],
+                        "subtopic": unit["title"] if unit["type"] == "study" else None,
+                        "user_id": roadmap.get("user_id", "local-user"),
+                        "title": title,
+                        "description": unit["description"],
+                        "task_type": unit["type"],
+                        "scheduled_date": available_days[day_index].isoformat(),
+                        "start_time": start_at.strftime("%I:%M %p"),
+                        "duration_minutes": segment_minutes,
+                        "status": "completed" if unit["key"] in completed_units else "pending",
+                        "phase_title": phase.get("title", ""),
+                        "topic_title": topic.get("title", ""),
+                        "created_at": datetime.now().isoformat(),
+                    })
+                    remaining -= segment_minutes
+                    used_minutes += segment_minutes
+                    segment += 1
+
+    tasks_by_topic = {}
+    for task in tasks:
+        tasks_by_topic.setdefault(task["topic_id"], []).append(task)
+    for phase in roadmap.get("phases", []):
+        for topic in phase.get("topics", []):
+            topic_tasks = tasks_by_topic.get(topic["id"], [])
+            units_by_key = {}
+            for task in topic_tasks:
+                units_by_key.setdefault(task["unit_key"], []).append(task)
+            if units_by_key:
+                finished_units = sum(
+                    all(part["status"] == "completed" for part in parts)
+                    for parts in units_by_key.values()
+                )
+                topic["completion_percentage"] = round(finished_units * 100 / len(units_by_key))
+                topic["is_completed"] = finished_units == len(units_by_key)
+                topic["subtopic_progress"] = [
+                    all(part["status"] == "completed" for part in units_by_key.get(f'{topic["id"]}:subtopic:{index}', []))
+                    for index, _ in enumerate(topic.get("subtopics", []))
+                ]
+
+    roadmap["daily_hours"] = daily_hours
+    roadmap["time_slot"] = time_slot
+    roadmap["preferred_days"] = [
+        day for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+        if day_numbers[day] in selected_days
+    ]
+    return tasks
+
+
 @app.route("/api/schedule/generate", methods=["POST"])
 def generate_schedule():
-    return jsonify({"success": True, "message": "Schedule generated successfully"})
+    data = request.get_json() or {}
+    roadmap_id = str(data.get("roadmap_id", "")).strip()
+    roadmap = next((item for item in STORE["roadmaps"] if item["id"] == roadmap_id), None)
+    if not roadmap:
+        return jsonify({"success": False, "error": "Roadmap not found."}), 404
+    preferred_days = data.get("preferred_days", roadmap.get("preferred_days", ["mon", "tue", "wed", "thu", "fri"]))
+    if not isinstance(preferred_days, list):
+        return jsonify({"success": False, "error": "Preferred study days must be a list."}), 400
+    try:
+        daily_hours = float(data.get("daily_hours", roadmap.get("daily_hours", 2)))
+        tasks = _schedule_roadmap_tasks(
+            roadmap,
+            daily_hours,
+            preferred_days,
+            data.get("time_slot", "morning"),
+        )
+    except (TypeError, ValueError) as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    except OverflowError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 422
+
+    STORE["tasks"] = [task for task in STORE["tasks"] if task.get("roadmap_id") != roadmap_id] + tasks
+    return jsonify({"success": True, "data": tasks})
 
 @app.route("/api/schedule/<roadmap_id>/reschedule", methods=["POST"])
 def reschedule(roadmap_id):
-    return jsonify({"success": True, "message": "Rescheduled overdue tasks"})
+    roadmap = next((item for item in STORE["roadmaps"] if item["id"] == roadmap_id), None)
+    if not roadmap:
+        return jsonify({"success": False, "error": "Roadmap not found."}), 404
+    try:
+        tasks = _schedule_roadmap_tasks(
+            roadmap,
+            roadmap.get("daily_hours", 2),
+            roadmap.get("preferred_days", ["mon", "tue", "wed", "thu", "fri"]),
+            roadmap.get("time_slot", "morning"),
+        )
+    except (TypeError, ValueError) as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    except OverflowError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 422
+    STORE["tasks"] = [task for task in STORE["tasks"] if task.get("roadmap_id") != roadmap_id] + tasks
+    return jsonify({"success": True, "data": tasks})
 
 @app.route("/api/tasks/<task_id>", methods=["PATCH"])
 def update_task(task_id):
     data = request.get_json() or {}
-    for t in STORE["tasks"]:
-        if t["id"] == task_id:
-            t.update(data)
-    return jsonify({"success": True})
+    task = next((item for item in STORE["tasks"] if item["id"] == task_id), None)
+    if not task:
+        return jsonify({"success": False, "error": "Task not found."}), 404
+    status = data.get("status")
+    if not isinstance(status, str) or status not in {"pending", "in_progress", "completed", "skipped", "missed"}:
+        return jsonify({"success": False, "error": "Choose a valid task status."}), 400
+    task["status"] = status
+    task["completed_at"] = datetime.now().isoformat() if status == "completed" else None
+
+    roadmap = next((item for item in STORE["roadmaps"] if item["id"] == task["roadmap_id"]), None)
+    if roadmap:
+        topic = next(
+            (topic for phase in roadmap.get("phases", []) for topic in phase.get("topics", [])
+             if topic["id"] == task["topic_id"]),
+            None,
+        )
+        topic_tasks = [
+            item for item in STORE["tasks"]
+            if item.get("roadmap_id") == task["roadmap_id"] and item.get("topic_id") == task["topic_id"]
+        ]
+        if topic and topic_tasks:
+            units = {}
+            for item in topic_tasks:
+                units.setdefault(item.get("unit_key", item["id"]), []).append(item)
+            completed_count = sum(all(part["status"] == "completed" for part in parts) for parts in units.values())
+            topic["completion_percentage"] = round(completed_count * 100 / len(units))
+            topic["is_completed"] = completed_count == len(units)
+            topic["subtopic_progress"] = [
+                all(part["status"] == "completed" for part in units.get(f'{topic["id"]}:subtopic:{index}', []))
+                for index, _ in enumerate(topic.get("subtopics", []))
+            ]
+        all_topics = [item for phase in roadmap.get("phases", []) for item in phase.get("topics", [])]
+        roadmap["completion_percentage"] = round(
+            sum(item.get("completion_percentage", 0) for item in all_topics) / len(all_topics)
+        ) if all_topics else 0
+    return jsonify({"success": True, "data": task})
 
 # ── AI Mentor Chat Endpoints ─────────────────────────────────────────────────
 @app.route("/api/chat/sessions", methods=["GET", "POST"])
@@ -685,6 +1031,49 @@ Learner's latest question:
     return jsonify({"success": True, "data": {"reply": reply_text, "message": assistant_msg}})
 
 # ── Notes & Quizzes Endpoints ────────────────────────────────────────────────
+@app.route("/api/resources", methods=["GET", "POST"])
+def handle_resources():
+    if request.method == "GET":
+        return jsonify({"success": True, "data": STORE["resources"]})
+
+    data = request.get_json() or {}
+    title = str(data.get("title", "")).strip()
+    url = str(data.get("url", "")).strip()
+    publisher = str(data.get("publisher", "")).strip()
+    description = str(data.get("description", "")).strip()
+    resource_type = str(data.get("resource_type", "documentation")).strip().lower()
+    valid_types = {"documentation", "course", "video", "book", "article", "tool", "practice", "other"}
+    parsed_url = urlparse(url)
+    if not title or len(title) > 300:
+        return jsonify({"success": False, "error": "Resource title must contain 1 to 300 characters."}), 400
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        return jsonify({"success": False, "error": "Enter a valid http or https resource URL."}), 400
+    if resource_type not in valid_types:
+        return jsonify({"success": False, "error": "Choose a valid resource type."}), 400
+    resource = {
+        "id": f"resource-{uuid.uuid4().hex[:10]}",
+        "title": title,
+        "url": url,
+        "publisher": publisher[:100],
+        "description": description[:2000],
+        "resource_type": resource_type,
+        "is_verified": False,
+        "tags": ["Saved"],
+        "created_at": datetime.now().isoformat(),
+    }
+    STORE["resources"].insert(0, resource)
+    return jsonify({"success": True, "data": resource}), 201
+
+
+@app.route("/api/resources/<resource_id>", methods=["DELETE"])
+def delete_resource(resource_id):
+    resource = next((item for item in STORE["resources"] if item["id"] == resource_id), None)
+    if not resource:
+        return jsonify({"success": False, "error": "Resource not found."}), 404
+    STORE["resources"].remove(resource)
+    return jsonify({"success": True, "message": "Resource deleted."})
+
+
 @app.route("/api/notes", methods=["GET", "POST"])
 def handle_notes():
     if request.method == "POST":
@@ -873,7 +1262,112 @@ def profile():
 
 @app.route("/api/progress/<roadmap_id>", methods=["GET"])
 def get_progress(roadmap_id):
-    return jsonify({"success": True, "data": {"overall_percentage": 35, "streak_days": 5}})
+    roadmap = next((item for item in STORE["roadmaps"] if item["id"] == roadmap_id), None)
+    if not roadmap:
+        return jsonify({"success": False, "error": "Roadmap not found."}), 404
+
+    roadmap_tasks = [task for task in STORE["tasks"] if task.get("roadmap_id") == roadmap_id]
+    study_sessions = [
+        item for item in STORE["study_sessions"]
+        if item.get("roadmap_id") == roadmap_id
+    ]
+    today = datetime.now().date()
+    week_start = today - timedelta(days=6)
+    week_activity = []
+    active_dates = set()
+    actual_hours = sum(
+        float(item.get("hours", 0))
+        for item in study_sessions
+    )
+    actual_hours += sum(
+        float(task.get("duration_minutes", 0)) / 60
+        for task in roadmap_tasks
+        if task.get("status") == "completed"
+    )
+    daily_hours_by_date = {}
+    for session in study_sessions:
+        session_date = session.get("date", "")
+        daily_hours_by_date[session_date] = daily_hours_by_date.get(session_date, 0) + float(session.get("hours", 0))
+        active_dates.add(session_date)
+    for task in roadmap_tasks:
+        if task.get("status") == "completed":
+            session_date = (task.get("completed_at") or task.get("scheduled_date", ""))[:10]
+            if session_date:
+                daily_hours_by_date[session_date] = daily_hours_by_date.get(session_date, 0) + float(task.get("duration_minutes", 0)) / 60
+                active_dates.add(session_date)
+    for offset in range(7):
+        activity_date = week_start + timedelta(days=offset)
+        date_key = activity_date.isoformat()
+        week_activity.append({
+            "date": activity_date.strftime("%a"),
+            "hours": round(daily_hours_by_date.get(date_key, 0), 1),
+        })
+
+    streak_days = 0
+    streak_date = today
+    while streak_date.isoformat() in active_dates:
+        streak_days += 1
+        streak_date -= timedelta(days=1)
+
+    topics = [topic for phase in roadmap.get("phases", []) for topic in phase.get("topics", [])]
+    completed_topics = [topic["title"] for topic in topics if topic.get("is_completed")]
+    focus_topics = [topic["title"] for topic in topics if not topic.get("is_completed")][:3]
+    phases = roadmap.get("phases", [])
+    completed_phases = sum(
+        bool(phase.get("topics")) and all(topic.get("is_completed") for topic in phase["topics"])
+        for phase in phases
+    )
+    planned_hours = sum(float(task.get("duration_minutes", 0)) / 60 for task in roadmap_tasks)
+    quiz_scores = [
+        attempt["score_percentage"]
+        for quiz in STORE["quizzes"]
+        if quiz.get("roadmap_id") == roadmap_id
+        for attempt in quiz.get("attempts", [])
+        if isinstance(attempt.get("score_percentage"), (int, float))
+    ]
+    return jsonify({"success": True, "data": {
+        "roadmap_id": roadmap_id,
+        "overall_percentage": roadmap.get("completion_percentage", 0),
+        "topics_completed": len(completed_topics),
+        "topics_total": len(topics),
+        "study_hours_planned": round(planned_hours, 1),
+        "study_hours_actual": round(actual_hours, 1),
+        "quiz_accuracy_avg": round(sum(quiz_scores) / len(quiz_scores)) if quiz_scores else None,
+        "milestones_reached": completed_phases,
+        "milestones_total": len(phases),
+        "streak_days": streak_days,
+        "week_activity": week_activity,
+        "strong_topics": completed_topics,
+        "weak_topics": [],
+        "next_recommendations": [f"Continue with {title}." for title in focus_topics],
+    }})
+
+
+@app.route("/api/progress/sessions", methods=["POST"])
+def log_study_session():
+    data = request.get_json() or {}
+    roadmap_id = str(data.get("roadmap_id", "")).strip()
+    topic = str(data.get("topic", "")).strip()
+    if not any(item["id"] == roadmap_id for item in STORE["roadmaps"]):
+        return jsonify({"success": False, "error": "Roadmap not found."}), 404
+    if not topic or len(topic) > 300:
+        return jsonify({"success": False, "error": "Enter a study topic up to 300 characters."}), 400
+    try:
+        hours = float(data.get("hours", 0))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Study time must be a number of hours."}), 400
+    if not math.isfinite(hours) or not 0.1 <= hours <= 24:
+        return jsonify({"success": False, "error": "Study time must be between 0.1 and 24 hours."}), 400
+    session = {
+        "id": f"study-{uuid.uuid4().hex[:10]}",
+        "roadmap_id": roadmap_id,
+        "topic": topic,
+        "hours": hours,
+        "date": datetime.now().date().isoformat(),
+        "created_at": datetime.now().isoformat(),
+    }
+    STORE["study_sessions"].append(session)
+    return jsonify({"success": True, "data": session}), 201
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))

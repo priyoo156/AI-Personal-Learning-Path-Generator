@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
@@ -7,7 +7,7 @@ import {
   Sparkles, RefreshCw, ChevronLeft, ChevronRight, Filter, Play,
   BookOpen, Code2, Repeat, CheckSquare
 } from 'lucide-react';
-import { scheduleApi, roadmapApi } from '@/services/api';
+import { scheduleApi, roadmapApi, extractErrorMessage } from '@/services/api';
 import { cn, formatDate } from '@/lib/utils';
 import type { StudyTask, Roadmap } from '@/types';
 import toast from 'react-hot-toast';
@@ -22,95 +22,11 @@ const DAYS_OF_WEEK = [
   { id: 'sun', label: 'Sun' },
 ];
 
-const MOCK_TASKS: StudyTask[] = [
-  {
-    id: 'task-1',
-    roadmap_id: 'demo-fullstack-ai',
-    topic_id: 't1',
-    user_id: 'demo',
-    title: 'Study: Prompt Engineering & System Instructions',
-    description: 'Review few-shot prompting techniques and build Markdown JSON parser',
-    task_type: 'study',
-    scheduled_date: new Date().toISOString().split('T')[0],
-    start_time: '09:00 AM',
-    duration_minutes: 60,
-    status: 'completed',
-    phase_title: 'Phase 1: Foundation of LLMs',
-    topic_title: 'Prompt Engineering',
-    completed_at: new Date().toISOString(),
-    created_at: new Date().toISOString(),
-  },
-  {
-    id: 'task-2',
-    roadmap_id: 'demo-fullstack-ai',
-    topic_id: 't2',
-    user_id: 'demo',
-    title: 'Practice: Build Structured Output Function Caller',
-    description: 'Implement weather and currency converter tool with Pydantic / Zod schema validation',
-    task_type: 'practice',
-    scheduled_date: new Date().toISOString().split('T')[0],
-    start_time: '07:00 PM',
-    duration_minutes: 90,
-    status: 'in_progress',
-    phase_title: 'Phase 1: Foundation of LLMs',
-    topic_title: 'Structured Output & Tool Calling',
-    created_at: new Date().toISOString(),
-  },
-  {
-    id: 'task-3',
-    roadmap_id: 'demo-fullstack-ai',
-    topic_id: 't3',
-    user_id: 'demo',
-    title: 'Study: Document Chunking & Tokenizer Limits',
-    description: 'Examine recursive character splitting and metadata extraction strategies',
-    task_type: 'study',
-    scheduled_date: new Date(Date.now() + 86400000).toISOString().split('T')[0],
-    start_time: '09:00 AM',
-    duration_minutes: 60,
-    status: 'pending',
-    phase_title: 'Phase 2: Embeddings & RAG',
-    topic_title: 'Smart Chunking Strategies',
-    created_at: new Date().toISOString(),
-  },
-  {
-    id: 'task-4',
-    roadmap_id: 'demo-fullstack-ai',
-    topic_id: 't3',
-    user_id: 'demo',
-    title: 'Quiz: Test RAG & Chunking Knowledge',
-    description: 'Take 5-question AI assessment to verify understanding of semantic overlap',
-    task_type: 'assessment',
-    scheduled_date: new Date(Date.now() + 86400000).toISOString().split('T')[0],
-    start_time: '07:30 PM',
-    duration_minutes: 30,
-    status: 'pending',
-    phase_title: 'Phase 2: Embeddings & RAG',
-    topic_title: 'Smart Chunking Strategies',
-    created_at: new Date().toISOString(),
-  },
-  {
-    id: 'task-5',
-    roadmap_id: 'demo-fullstack-ai',
-    topic_id: 't4',
-    user_id: 'demo',
-    title: 'Practice: Deploy Pgvector Extension in PostgreSQL',
-    description: 'Configure HNSW index and run 10k similarity query benchmarks',
-    task_type: 'practice',
-    scheduled_date: new Date(Date.now() + 172800000).toISOString().split('T')[0],
-    start_time: '10:00 AM',
-    duration_minutes: 120,
-    status: 'pending',
-    phase_title: 'Phase 2: Embeddings & RAG',
-    topic_title: 'Vector Databases (Pgvector)',
-    created_at: new Date().toISOString(),
-  },
-];
-
 export default function SchedulerPage() {
   const { roadmapId: paramRoadmapId } = useParams<{ roadmapId?: string }>();
   const queryClient = useQueryClient();
 
-  const [selectedRoadmapId, setSelectedRoadmapId] = useState<string>(paramRoadmapId || 'demo-fullstack-ai');
+  const [selectedRoadmapId, setSelectedRoadmapId] = useState<string>(paramRoadmapId || '');
   const [dailyHours, setDailyHours] = useState<number>(2);
   const [selectedDays, setSelectedDays] = useState<string[]>(['mon', 'tue', 'wed', 'thu', 'fri', 'sat']);
   const [preferredTimeSlot, setPreferredTimeSlot] = useState<'morning' | 'afternoon' | 'evening'>('morning');
@@ -122,40 +38,49 @@ export default function SchedulerPage() {
     queryFn: () => roadmapApi.list(),
   });
   const roadmaps: Roadmap[] = (roadmapsRes?.data?.data as Roadmap[]) || [];
+  const selectedRoadmap = roadmaps.find((roadmap) => roadmap.id === selectedRoadmapId);
+
+  useEffect(() => {
+    if (paramRoadmapId) {
+      setSelectedRoadmapId(paramRoadmapId);
+    } else if (!selectedRoadmapId && roadmaps.length) {
+      setSelectedRoadmapId(roadmaps[0].id);
+    }
+  }, [paramRoadmapId, roadmaps, selectedRoadmapId]);
+
+  useEffect(() => {
+    if (!selectedRoadmap) return;
+    setDailyHours(selectedRoadmap.daily_hours || 2);
+    setSelectedDays(selectedRoadmap.preferred_days?.length
+      ? selectedRoadmap.preferred_days
+      : ['mon', 'tue', 'wed', 'thu', 'fri']);
+  }, [selectedRoadmap?.id]);
 
   // Fetch tasks
   const { data: tasksRes, isLoading } = useQuery({
     queryKey: ['scheduler-tasks', selectedRoadmapId],
+    enabled: Boolean(selectedRoadmapId),
     queryFn: async () => {
-      try {
-        const res = await scheduleApi.getTasks(selectedRoadmapId);
-        const list = res.data?.data as StudyTask[] | undefined;
-        return list?.length ? { data: list } : { data: MOCK_TASKS };
-      } catch {
-        return { data: MOCK_TASKS };
-      }
+      const res = await scheduleApi.getTasks(selectedRoadmapId);
+      return (res.data?.data as StudyTask[] | undefined) || [];
     },
   });
 
-  const tasks: StudyTask[] = (tasksRes?.data as StudyTask[]) || MOCK_TASKS;
+  const tasks: StudyTask[] = tasksRes || [];
 
   // Toggle task status mutation
   const toggleTaskMutation = useMutation({
     mutationFn: async ({ taskId, newStatus }: { taskId: string; newStatus: 'completed' | 'pending' }) => {
-      await scheduleApi.updateTask(taskId, { status: newStatus });
+      return scheduleApi.updateTask(taskId, { status: newStatus });
     },
-    onMutate: async ({ taskId, newStatus }) => {
-      queryClient.setQueryData(['scheduler-tasks', selectedRoadmapId], (old: { data: StudyTask[] } | undefined) => {
-        if (!old?.data) return old;
-        return {
-          ...old,
-          data: old.data.map((t) => (t.id === taskId ? { ...t, status: newStatus } : t)),
-        };
-      });
+    onSuccess: (_, { newStatus }) => {
       toast.success(newStatus === 'completed' ? 'Task completed! Keep it up! 🎉' : 'Task marked as pending');
+      queryClient.invalidateQueries({ queryKey: ['scheduler-tasks', selectedRoadmapId] });
+      queryClient.invalidateQueries({ queryKey: ['roadmaps'] });
+      queryClient.invalidateQueries({ queryKey: ['roadmap', selectedRoadmapId] });
     },
-    onError: () => {
-      toast.error('Failed to update task');
+    onError: (error) => {
+      toast.error(extractErrorMessage(error));
     },
   });
 
@@ -169,11 +94,12 @@ export default function SchedulerPage() {
       });
     },
     onSuccess: () => {
-      toast.success('AI Timetable successfully updated!');
+      toast.success('Schedule built from your roadmap and availability.');
       queryClient.invalidateQueries({ queryKey: ['scheduler-tasks', selectedRoadmapId] });
+      queryClient.invalidateQueries({ queryKey: ['roadmaps'] });
     },
-    onError: () => {
-      toast.success('Schedule optimized based on your target pace!');
+    onError: (error) => {
+      toast.error(extractErrorMessage(error));
     },
   });
 
@@ -183,11 +109,11 @@ export default function SchedulerPage() {
       return scheduleApi.reschedule(selectedRoadmapId);
     },
     onSuccess: () => {
-      toast.success('AI redistributed overdue tasks across upcoming available slots!');
+      toast.success('Schedule rebuilt from today using your roadmap and availability.');
       queryClient.invalidateQueries({ queryKey: ['scheduler-tasks', selectedRoadmapId] });
     },
-    onError: () => {
-      toast.success('Rescheduled overdue sessions into your upcoming schedule!');
+    onError: (error) => {
+      toast.error(extractErrorMessage(error));
     },
   });
 
@@ -232,22 +158,33 @@ export default function SchedulerPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          <select
+            className="input min-w-48 text-xs"
+            aria-label="Select roadmap"
+            value={selectedRoadmapId}
+            onChange={(event) => setSelectedRoadmapId(event.target.value)}
+          >
+            <option value="">Choose a roadmap</option>
+            {roadmaps.map((roadmap) => (
+              <option key={roadmap.id} value={roadmap.id}>{roadmap.title}</option>
+            ))}
+          </select>
           <button
             onClick={() => rescheduleMutation.mutate()}
-            disabled={rescheduleMutation.isPending}
+            disabled={!selectedRoadmapId || rescheduleMutation.isPending}
             className="btn-secondary text-xs flex items-center gap-1.5"
-            title="Automatically redistribute missed tasks without falling behind"
+            title="Rebuild remaining sessions from today"
           >
             <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-            {rescheduleMutation.isPending ? 'Rescheduling...' : 'AI Auto-Reschedule'}
+            {rescheduleMutation.isPending ? 'Rescheduling...' : 'Reschedule'}
           </button>
           <button
             onClick={() => generateScheduleMutation.mutate()}
-            disabled={generateScheduleMutation.isPending}
+            disabled={!selectedRoadmapId || generateScheduleMutation.isPending}
             className="btn-primary text-xs flex items-center gap-1.5"
           >
             <RefreshCw className={cn('w-3.5 h-3.5', generateScheduleMutation.isPending && 'animate-spin')} />
-            {generateScheduleMutation.isPending ? 'Generating...' : 'Rebuild Schedule'}
+            {generateScheduleMutation.isPending ? 'Building...' : 'Build Schedule'}
           </button>
         </div>
       </div>
@@ -266,7 +203,7 @@ export default function SchedulerPage() {
         </div>
         <div className="card p-4">
           <p className="text-xs text-muted-foreground">Target Daily Commitment</p>
-          <p className="text-2xl font-bold font-display text-brand-600 dark:text-brand-400 mt-1">{dailyHours}h / day</p>
+          <p className="text-2xl font-bold font-display text-brand-600 dark:text-brand-400 mt-1">{selectedRoadmap?.daily_hours || dailyHours}h / day</p>
         </div>
         <div className="card p-4">
           <p className="text-xs text-muted-foreground">Active Days per Week</p>
@@ -377,10 +314,18 @@ export default function SchedulerPage() {
 
       {/* Tasks List */}
       <div className="space-y-3">
-        {filteredTasks.length === 0 ? (
+        {isLoading ? (
+          <div className="card p-12 text-center text-muted-foreground">Loading roadmap sessions…</div>
+        ) : filteredTasks.length === 0 ? (
           <div className="card p-12 text-center text-muted-foreground">
             <CheckCircle2 className="w-10 h-10 mx-auto text-muted-foreground/50 mb-2" />
-            <p className="text-sm font-medium">No tasks found for this filter</p>
+            <p className="text-sm font-medium">
+              {!selectedRoadmapId
+                ? 'Create a roadmap before scheduling study tasks.'
+                : tasks.length
+                  ? 'No tasks found for this filter.'
+                  : 'No sessions are scheduled yet. Build a schedule from your roadmap.'}
+            </p>
           </div>
         ) : (
           filteredTasks.map((task) => {

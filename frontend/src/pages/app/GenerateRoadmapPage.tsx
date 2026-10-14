@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -22,17 +22,9 @@ const EXAMPLE_GOALS = [
 ];
 
 interface GenerationState {
-  phase: 'idle' | 'analyzing' | 'researching' | 'generating' | 'validating' | 'done' | 'error';
+  phase: 'idle' | 'generating' | 'done' | 'error';
   message: string;
-  progress: number;
 }
-
-const GEN_PHASES: GenerationState[] = [
-  { phase: 'analyzing', message: 'Analyzing your goal and domain…', progress: 15 },
-  { phase: 'researching', message: 'Researching real-world resources and materials…', progress: 40 },
-  { phase: 'generating', message: 'Generating your personalized roadmap…', progress: 70 },
-  { phase: 'validating', message: 'Validating structure and prerequisites…', progress: 90 },
-];
 
 export default function GenerateRoadmapPage() {
   const location = useLocation();
@@ -47,7 +39,7 @@ export default function GenerateRoadmapPage() {
   const [language, setLanguage] = useState('en');
   const [priorExp, setPriorExp] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [genState, setGenState] = useState<GenerationState>({ phase: 'idle', message: '', progress: 0 });
+  const [genState, setGenState] = useState<GenerationState>({ phase: 'idle', message: '' });
 
   // Auto-detect domain from goal
   const detectedDomain = goal ? detectDomainCategory(goal) : '';
@@ -58,13 +50,7 @@ export default function GenerateRoadmapPage() {
       return;
     }
 
-    // Simulate phased progress while waiting for API
-    setGenState(GEN_PHASES[0]);
-    let phaseIdx = 0;
-    const progressInterval = setInterval(() => {
-      phaseIdx = Math.min(phaseIdx + 1, GEN_PHASES.length - 1);
-      setGenState(GEN_PHASES[phaseIdx]);
-    }, 3500);
+    setGenState({ phase: 'generating', message: 'Generating a roadmap from your goal and syllabus…' });
 
     try {
       const res = await roadmapApi.generate({
@@ -77,8 +63,7 @@ export default function GenerateRoadmapPage() {
         preferred_language: language,
       });
 
-      clearInterval(progressInterval);
-      setGenState({ phase: 'done', message: 'Roadmap generated!', progress: 100 });
+      setGenState({ phase: 'done', message: 'Roadmap generated!' });
 
       const roadmap = res.data?.data as Roadmap;
       if (roadmap?.id) {
@@ -88,14 +73,13 @@ export default function GenerateRoadmapPage() {
         throw new Error('Unexpected response format');
       }
     } catch (err) {
-      clearInterval(progressInterval);
       const msg = extractErrorMessage(err);
-      setGenState({ phase: 'error', message: msg, progress: 0 });
+      setGenState({ phase: 'error', message: msg });
       toast.error('Failed to generate roadmap: ' + msg);
     }
   };
 
-  const isGenerating = ['analyzing', 'researching', 'generating', 'validating'].includes(genState.phase);
+  const isGenerating = genState.phase === 'generating';
 
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8">
@@ -279,13 +263,13 @@ export default function GenerateRoadmapPage() {
               </div>
               <div className="h-2 rounded-full bg-brand-100 dark:bg-brand-900/30 overflow-hidden">
                 <motion.div
-                  className="h-full rounded-full bg-gradient-to-r from-brand-500 to-violet-500"
-                  animate={{ width: `${genState.progress}%` }}
-                  transition={{ duration: 0.5 }}
+                  className="h-full w-1/3 rounded-full bg-gradient-to-r from-brand-500 to-violet-500"
+                  animate={{ x: ['-100%', '300%'] }}
+                  transition={{ duration: 1.4, repeat: Infinity, ease: 'easeInOut' }}
                 />
               </div>
               <p className="mt-2 text-xs text-brand-600 dark:text-brand-400">
-                ✨ AI is researching real-world resources and building your personalized plan…
+                The AI is creating and checking the roadmap. This can take a little while.
               </p>
             </motion.div>
           )}

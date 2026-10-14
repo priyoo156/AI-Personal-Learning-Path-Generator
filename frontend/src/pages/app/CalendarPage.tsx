@@ -1,12 +1,13 @@
-import { useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { useEffect, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ChevronLeft, ChevronRight, Calendar as CalendarIcon, Clock,
-  CheckCircle2, Circle, Sparkles, Flame, Play, BookOpen, Plus
+  CheckCircle2, Circle, Play, Plus
 } from 'lucide-react';
 import { cn, formatDate } from '@/lib/utils';
 import { Link } from 'react-router-dom';
-import type { StudyTask } from '@/types';
+import { roadmapApi, scheduleApi, extractErrorMessage } from '@/services/api';
+import type { Roadmap, StudyTask } from '@/types';
 import toast from 'react-hot-toast';
 
 // Generate current month days
@@ -23,92 +24,57 @@ const MONTH_NAMES = [
   'July', 'August', 'September', 'October', 'November', 'December'
 ];
 
+function localDateString(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 export default function CalendarPage() {
   const today = new Date();
+  const queryClient = useQueryClient();
   const [currentYear, setCurrentYear] = useState<number>(today.getFullYear());
   const [currentMonth, setCurrentMonth] = useState<number>(today.getMonth());
-  const [selectedDateStr, setSelectedDateStr] = useState<string>(
-    today.toISOString().split('T')[0]
-  );
+  const [selectedDateStr, setSelectedDateStr] = useState<string>(localDateString(today));
+  const [selectedRoadmapId, setSelectedRoadmapId] = useState('');
 
-  // Mock task calendar entries
-  const [tasks, setTasks] = useState<StudyTask[]>([
-    {
-      id: 'cal-1',
-      roadmap_id: 'demo-fullstack-ai',
-      topic_id: 't1',
-      user_id: 'demo',
-      title: 'Prompt Engineering & System Instructions',
-      description: 'Master few-shot and delimiters for reliable responses',
-      task_type: 'study',
-      scheduled_date: today.toISOString().split('T')[0],
-      start_time: '09:00 AM',
-      duration_minutes: 60,
-      status: 'completed',
-      phase_title: 'Phase 1: Foundation of LLMs',
-      created_at: new Date().toISOString(),
+  const roadmapsQuery = useQuery({
+    queryKey: ['roadmaps'],
+    queryFn: async () => {
+      const response = await roadmapApi.list();
+      return (response.data.data as Roadmap[] | undefined) || [];
     },
-    {
-      id: 'cal-2',
-      roadmap_id: 'demo-fullstack-ai',
-      topic_id: 't2',
-      user_id: 'demo',
-      title: 'Build Tool-Calling Function Playground',
-      description: 'Implement structured schema outputs with error correction',
-      task_type: 'practice',
-      scheduled_date: today.toISOString().split('T')[0],
-      start_time: '07:00 PM',
-      duration_minutes: 90,
-      status: 'pending',
-      phase_title: 'Phase 1: Foundation of LLMs',
-      created_at: new Date().toISOString(),
+  });
+  const roadmaps = roadmapsQuery.data || [];
+
+  useEffect(() => {
+    if (!selectedRoadmapId && roadmaps.length) setSelectedRoadmapId(roadmaps[0].id);
+  }, [roadmaps, selectedRoadmapId]);
+
+  const monthStart = localDateString(new Date(currentYear, currentMonth, 1));
+  const monthEnd = localDateString(new Date(currentYear, currentMonth, getDaysInMonth(currentYear, currentMonth)));
+  const tasksQuery = useQuery({
+    queryKey: ['calendar-tasks', selectedRoadmapId, monthStart, monthEnd],
+    enabled: Boolean(selectedRoadmapId),
+    queryFn: async () => {
+      const response = await scheduleApi.getTasks(selectedRoadmapId, monthStart, monthEnd);
+      return (response.data.data as StudyTask[] | undefined) || [];
     },
-    {
-      id: 'cal-3',
-      roadmap_id: 'demo-fullstack-ai',
-      topic_id: 't3',
-      user_id: 'demo',
-      title: 'Document Processing & Recursive Chunking',
-      description: 'Deep dive into boundary preservation and token sizing',
-      task_type: 'study',
-      scheduled_date: new Date(Date.now() + 86400000).toISOString().split('T')[0],
-      start_time: '10:00 AM',
-      duration_minutes: 60,
-      status: 'pending',
-      phase_title: 'Phase 2: RAG',
-      created_at: new Date().toISOString(),
+  });
+  const tasks = tasksQuery.data || [];
+  const toggleTaskMutation = useMutation({
+    mutationFn: ({ taskId, status }: { taskId: string; status: 'completed' | 'pending' }) =>
+      scheduleApi.updateTask(taskId, { status }),
+    onSuccess: (_, { status }) => {
+      toast.success(status === 'completed' ? 'Study session completed.' : 'Session marked as pending.');
+      queryClient.invalidateQueries({ queryKey: ['calendar-tasks', selectedRoadmapId] });
+      queryClient.invalidateQueries({ queryKey: ['scheduler-tasks', selectedRoadmapId] });
+      queryClient.invalidateQueries({ queryKey: ['roadmap', selectedRoadmapId] });
+      queryClient.invalidateQueries({ queryKey: ['roadmaps'] });
     },
-    {
-      id: 'cal-4',
-      roadmap_id: 'demo-fullstack-ai',
-      topic_id: 't4',
-      user_id: 'demo',
-      title: 'Vector Databases Benchmarks',
-      description: 'Deploy pgvector with HNSW indexing',
-      task_type: 'practice',
-      scheduled_date: new Date(Date.now() + 172800000).toISOString().split('T')[0],
-      start_time: '02:00 PM',
-      duration_minutes: 120,
-      status: 'pending',
-      phase_title: 'Phase 2: RAG',
-      created_at: new Date().toISOString(),
-    },
-    {
-      id: 'cal-5',
-      roadmap_id: 'demo-fullstack-ai',
-      topic_id: 't3',
-      user_id: 'demo',
-      title: 'Assessment: RAG Architecture',
-      description: 'Evaluate comprehension on vector similarity search',
-      task_type: 'assessment',
-      scheduled_date: new Date(Date.now() + 259200000).toISOString().split('T')[0],
-      start_time: '08:00 PM',
-      duration_minutes: 30,
-      status: 'pending',
-      phase_title: 'Phase 2: RAG',
-      created_at: new Date().toISOString(),
-    },
-  ]);
+    onError: (error) => toast.error(extractErrorMessage(error)),
+  });
 
   const daysInMonth = getDaysInMonth(currentYear, currentMonth);
   const firstDay = getFirstDayOfWeek(currentYear, currentMonth);
@@ -117,8 +83,10 @@ export default function CalendarPage() {
     if (currentMonth === 0) {
       setCurrentMonth(11);
       setCurrentYear((y) => y - 1);
+      setSelectedDateStr(localDateString(new Date(currentYear - 1, 11, 1)));
     } else {
       setCurrentMonth((m) => m - 1);
+      setSelectedDateStr(localDateString(new Date(currentYear, currentMonth - 1, 1)));
     }
   };
 
@@ -126,31 +94,30 @@ export default function CalendarPage() {
     if (currentMonth === 11) {
       setCurrentMonth(0);
       setCurrentYear((y) => y + 1);
+      setSelectedDateStr(localDateString(new Date(currentYear + 1, 0, 1)));
     } else {
       setCurrentMonth((m) => m + 1);
+      setSelectedDateStr(localDateString(new Date(currentYear, currentMonth + 1, 1)));
     }
   };
 
   const goToToday = () => {
     setCurrentYear(today.getFullYear());
     setCurrentMonth(today.getMonth());
-    setSelectedDateStr(today.toISOString().split('T')[0]);
+    setSelectedDateStr(localDateString(today));
   };
 
   const toggleTask = (taskId: string) => {
-    setTasks((prev) =>
-      prev.map((t) => {
-        if (t.id === taskId) {
-          const newStatus = t.status === 'completed' ? 'pending' : 'completed';
-          toast.success(newStatus === 'completed' ? 'Great job finishing this study task! 🔥' : 'Marked as pending');
-          return { ...t, status: newStatus };
-        }
-        return t;
-      })
-    );
+    const task = tasks.find((item) => item.id === taskId);
+    if (!task) return;
+    toggleTaskMutation.mutate({
+      taskId,
+      status: task.status === 'completed' ? 'pending' : 'completed',
+    });
   };
 
   const selectedDayTasks = tasks.filter((t) => t.scheduled_date === selectedDateStr);
+  const completedThisMonth = tasks.filter((task) => task.status === 'completed').length;
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
@@ -159,23 +126,50 @@ export default function CalendarPage() {
         <div>
           <h1 className="text-2xl font-display font-bold text-foreground">Learning Calendar</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Track your daily learning consistency, review scheduled sessions, and maintain your streak.
+            See and complete the study sessions generated from your selected roadmap.
           </p>
         </div>
 
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-xs font-semibold">
-            <Flame className="w-4 h-4 fill-amber-500 text-amber-500" />
-            <span>5 Day Streak</span>
-          </div>
+          <select
+            className="input min-w-48 text-xs"
+            aria-label="Choose roadmap calendar"
+            value={selectedRoadmapId}
+            onChange={(event) => setSelectedRoadmapId(event.target.value)}
+          >
+            <option value="">Choose a roadmap</option>
+            {roadmaps.map((roadmap) => (
+              <option key={roadmap.id} value={roadmap.id}>{roadmap.title}</option>
+            ))}
+          </select>
+          <span className="text-xs text-muted-foreground">{completedThisMonth} sessions completed this month</span>
           <button onClick={goToToday} className="btn-secondary text-xs">
             Today
           </button>
         </div>
       </div>
 
+      {!selectedRoadmapId && (
+        <div className="card p-8 text-center text-muted-foreground">
+          {roadmapsQuery.isLoading
+            ? 'Loading your roadmaps…'
+            : roadmapsQuery.isError
+              ? 'Could not load your roadmaps. Please try again.'
+              : 'Create a roadmap before viewing scheduled learning sessions.'}
+          {!roadmaps.length && !roadmapsQuery.isLoading && (
+            <Link to="/app/generate" className="btn-primary mx-auto mt-4 w-fit">Create a roadmap</Link>
+          )}
+        </div>
+      )}
+
+      {tasksQuery.isError && selectedRoadmapId && (
+        <div role="alert" className="card p-4 text-sm text-destructive">
+          Could not load calendar sessions. Refresh the page and try again.
+        </div>
+      )}
+
       {/* Main Grid: Calendar on Left, Selected Day Drawer on Right */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      {selectedRoadmapId && <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Calendar View */}
         <div className="card p-6 lg:col-span-2 border-border space-y-4">
           {/* Month Navigator */}
@@ -232,7 +226,14 @@ export default function CalendarPage() {
               return (
                 <div
                   key={dayNum}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${dateStr}${dayTasks.length ? `, ${dayTasks.length} sessions` : ', no sessions'}`}
+                  aria-pressed={isSelected}
                   onClick={() => setSelectedDateStr(dateStr)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') setSelectedDateStr(dateStr);
+                  }}
                   className={cn(
                     'min-h-[70px] sm:min-h-[85px] rounded-xl p-1.5 sm:p-2 border cursor-pointer transition-all flex flex-col justify-between select-none',
                     isSelected
@@ -305,7 +306,9 @@ export default function CalendarPage() {
 
           {/* Agenda items */}
           <div className="space-y-3 flex-1 overflow-y-auto">
-            {selectedDayTasks.length === 0 ? (
+            {tasksQuery.isLoading ? (
+              <p className="py-12 text-center text-xs text-muted-foreground">Loading sessions…</p>
+            ) : selectedDayTasks.length === 0 ? (
               <div className="text-center py-12 text-muted-foreground space-y-2">
                 <CalendarIcon className="w-8 h-8 mx-auto text-muted-foreground/40" />
                 <p className="text-xs">No learning tasks scheduled for this day.</p>
@@ -330,6 +333,7 @@ export default function CalendarPage() {
                     <div className="flex items-start gap-2.5">
                       <button
                         onClick={() => toggleTask(t.id)}
+                        disabled={toggleTaskMutation.isPending}
                         className="mt-0.5 text-muted-foreground hover:text-brand-500 transition-colors flex-shrink-0"
                       >
                         {isDone ? (
@@ -375,7 +379,7 @@ export default function CalendarPage() {
             )}
           </div>
         </div>
-      </div>
+      </div>}
     </div>
   );
 }
