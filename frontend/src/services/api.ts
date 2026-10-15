@@ -2,7 +2,10 @@ import axios, { AxiosError, AxiosResponse } from 'axios';
 import { supabase } from '@/lib/supabase';
 import type { ApiResponse } from '@/types';
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const configuredApiBase = import.meta.env.VITE_API_URL?.replace(/\/+$/, '');
+const API_BASE = configuredApiBase
+  ? (/\/api$/i.test(configuredApiBase) ? configuredApiBase : `${configuredApiBase}/api`)
+  : '/api';
 
 // Create axios instance
 const apiClient = axios.create({
